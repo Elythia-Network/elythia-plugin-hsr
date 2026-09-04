@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/plugin"
+	"github.com/shiroha-a/mk/plugin/peercache"
 )
 
 // Plugin is the entry point referenced by the generated registration code.
@@ -27,12 +28,15 @@ var Plugin = plugin.Definition{
 	Name:       "hsr",
 	Version:    "0.1.0",
 	APIVersion: plugin.APIVersion,
-	Migrations: migrations,
+	Migrations: append(migrations, peerCacheMigration...),
 	Routes:     routes,
 	Jobs:       jobs,
 	// 同じプラグインを入れた mk-go 同士で、リモート利用者の戦績を取り寄せる。
 	// ActivityPub には出ない経路 (mk-go #2537)。
 	Peered: true,
+	// **登録はここ (mk-go #2819)。** Routes の中でやると、ロールを分割した
+	// 構成で応答が届かない (送信の POST は queue ロールで走る)。
+	Peer: peer,
 }
 
 // settings mirrors the `plugins.hsr` section of the instance config.
@@ -100,21 +104,26 @@ var migrations = []plugin.Migration{
 			fetched_at      timestamptz NOT NULL DEFAULT now(),
 			expires_at      timestamptz NOT NULL
 		);
-		CREATE TABLE remote_snapshots (
-			host       text NOT NULL,
-			username   text NOT NULL,
-			payload    jsonb NOT NULL,
-			fetched_at timestamptz NOT NULL DEFAULT now(),
-			expires_at timestamptz NOT NULL,
-			PRIMARY KEY (host, username)
-		);
-		CREATE TABLE remote_pending (
-			id         text PRIMARY KEY,
-			host       text NOT NULL,
-			username   text NOT NULL,
-			created_at timestamptz NOT NULL DEFAULT now()
-		);
 	`},
+}
+
+// peerCacheMigration replaces the hand-written remote cache with
+// plugin/peercache (mk-go #2820)。**中身はキャッシュなので捨ててよい。**
+var peerCacheMigration = append([]plugin.Migration{{
+	Version: 2,
+	SQL: `
+		DROP TABLE IF EXISTS remote_snapshots;
+		DROP TABLE IF EXISTS remote_pending;
+	`,
+}}, peercache.Migrations(3)...)
+
+// peer registers both directions of the plugin channel.
+func peer(ctx plugin.Context, p plugin.Peer) error {
+	set, err := loadSettings(ctx)
+	if err != nil {
+		return err
+	}
+	return registerPeer(ctx, p, ctx.Storage().DB(), newEnkaClient(set))
 }
 
 // uidPattern matches a Star Rail UID.
@@ -130,9 +139,6 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 	}
 	db := ctx.Storage().DB()
 	client := newEnkaClient(set)
-
-	// 同じプラグインを入れた mk-go 同士のやりとり (mk-go #2537)。
-	registerPeer(ctx, db, client)
 
 	r.POST("/me", func(req plugin.Request) (any, error) {
 		me := req.UserID()

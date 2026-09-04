@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/plugin"
+	"github.com/shiroha-a/mk/plugin/peercache"
 )
 
 /*
@@ -21,15 +22,6 @@ import (
  * **問い合わせは非同期。** 送ってすぐ答えは返らないので、初回は「まだ無い」
  * として返し、届いた分を次から出す。
  */
-
-// remoteTTL is how long a fetched remote profile is reused.
-//
-// 相手も Enka から取り直しているので、こちらが頻繁に聞いても新しくならない。
-// **相手に負荷をかけない**ことを優先して長めにする。
-const remoteTTL = 30 * time.Minute
-
-// remoteNegativeTTL is how long "that user has no UID" is remembered.
-const remoteNegativeTTL = 10 * time.Minute
 
 // peerRequest is what we ask another instance.
 //
@@ -44,9 +36,33 @@ type peerResponse struct {
 	Profile json.RawMessage `json:"profile,omitempty"`
 }
 
+// remoteTTL / remoteNegativeTTL は peercache に渡す寿命。
+const (
+	remoteTTL         = 30 * time.Minute
+	remoteNegativeTTL = 10 * time.Minute
+)
+
+// newRemoteCache builds the view-time cache shared by the peer callback and
+// the profile route.
+//
+// **型は plugin/peercache が持つ (mk-go #2820)。** 非同期取り寄せ + TTL +
+// 空振りの記憶 + 初回は空、という形は 3 プラグインに手で書かれていた。
+func newRemoteCache(ctx plugin.Context, db *sql.DB) (*peercache.Cache, error) {
+	return peercache.New(peercache.Options{
+		Context:     ctx,
+		DB:          db,
+		Request:     func(key string) any { return peerRequest{Username: key} },
+		TTL:         remoteTTL,
+		NegativeTTL: remoteNegativeTTL,
+	})
+}
+
 // registerPeer wires both directions of the plugin channel.
-func registerPeer(ctx plugin.Context, db *sql.DB, client *enkaClient) {
-	peer := ctx.Peer()
+func registerPeer(ctx plugin.Context, peer plugin.Peer, db *sql.DB, client *enkaClient) error {
+	cache, err := newRemoteCache(ctx, db)
+	if err != nil {
+		return err
+	}
 
 	// 相手から「この利用者の戦績をくれ」と聞かれたとき。
 	//
@@ -84,23 +100,14 @@ func registerPeer(ctx plugin.Context, db *sql.DB, client *enkaClient) {
 	})
 
 	// 問い合わせの答えが返ってきたとき。
-	peer.OnReply(func(c context.Context, from, id string, reply json.RawMessage) error {
+	peer.OnReply(func(c context.Context, _, id string, reply json.RawMessage) error {
 		var res peerResponse
 		if err := json.Unmarshal(reply, &res); err != nil {
 			return fmt.Errorf("応答を読めません: %w", err)
 		}
-		username, err := pendingUsername(c, db, id)
-		if err != nil {
-			return err
-		}
-		if username == "" {
-			// どの問い合わせの答えか分からない。**捨てる。**
-			// 相関が取れないものを取り込むと、別人の戦績を出しかねない。
-			ctx.Logger().Warn("対応する問い合わせが無い応答を捨てました", "from", from, "id", id)
-			return nil
-		}
-		return saveRemote(c, db, from, username, res)
+		return cache.Store(c, id, res.Profile, res.Linked && len(res.Profile) > 0)
 	})
+	return nil
 }
 
 // localUserIDByUsername resolves a local username to its user id.
@@ -140,90 +147,21 @@ func localUserIDByUsername(c context.Context, ctx plugin.Context, username strin
 	return user.ID, nil
 }
 
-// rememberPending records which username a send id was for.
-func rememberPending(c context.Context, db *sql.DB, id, host, username string) error {
-	_, err := db.ExecContext(c, `
-		INSERT INTO remote_pending (id, host, username, created_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (id) DO NOTHING
-	`, id, host, username)
-	return err
-}
-
-// pendingUsername returns the username a send id was for.
-func pendingUsername(c context.Context, db *sql.DB, id string) (string, error) {
-	var username string
-	err := db.QueryRowContext(c, `SELECT username FROM remote_pending WHERE id = $1`, id).Scan(&username)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	// 一度使ったら消す。応答は 1 回しか来ない。
-	_, _ = db.ExecContext(c, `DELETE FROM remote_pending WHERE id = $1`, id)
-	return username, nil
-}
-
-// saveRemote stores what another instance answered.
-func saveRemote(c context.Context, db *sql.DB, host, username string, res peerResponse) error {
-	ttl := remoteTTL
-	payload := res.Profile
-	if !res.Linked || len(payload) == 0 {
-		// 登録していない利用者。**空で覚える** — 開くたびに聞かないため。
-		ttl = remoteNegativeTTL
-		payload = json.RawMessage(`null`)
-	}
-	_, err := db.ExecContext(c, `
-		INSERT INTO remote_snapshots (host, username, payload, fetched_at, expires_at)
-		VALUES ($1, $2, $3, now(), now() + make_interval(secs => $4))
-		ON CONFLICT (host, username) DO UPDATE SET
-			payload = EXCLUDED.payload, fetched_at = EXCLUDED.fetched_at,
-			expires_at = EXCLUDED.expires_at
-	`, host, username, []byte(payload), int(ttl.Seconds()))
-	return err
-}
-
-// remoteProfile returns the cached profile for a remote user, and whether it
-// needs refreshing.
-func remoteProfile(c context.Context, db *sql.DB, host, username string) (json.RawMessage, bool, error) {
-	var payload []byte
-	var expired bool
-	err := db.QueryRowContext(c, `
-		SELECT payload, expires_at <= now() FROM remote_snapshots
-		WHERE host = $1 AND username = $2
-	`, host, username).Scan(&payload, &expired)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, true, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if string(payload) == "null" {
-		return nil, expired, nil
-	}
-	return payload, expired, nil
-}
-
 // remoteLookup answers for a user that is not ours.
-//
-// **その場では取りに行けない。** peer channel は非同期なので、初回は
-// 「まだ無い」を返して問い合わせだけ出す。届いた分は次に開いたときに出る。
 func remoteLookup(c context.Context, ctx plugin.Context, db *sql.DB, viewerID, userID string) (any, error) {
 	host, username, err := remoteAcct(c, ctx, viewerID, userID)
 	if err != nil || host == "" {
-		// **エラーにしない。** そもそも関係のない利用者のプロフィールを
-		// 開いただけかもしれない。表示側は linked:false で何も描かない。
 		return map[string]any{"linked": false}, nil
 	}
 
-	cached, stale, err := remoteProfile(c, db, host, username)
+	cache, err := newRemoteCache(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	if stale {
-		// 期限切れでも**古いものは返す**。取り直しは裏で進む。
-		ask(c, ctx, db, host, username)
+	// 初回は空で返り、取り寄せは裏で走る。期限切れでも古いものは返る。
+	cached, err := cache.Lookup(c, host, username)
+	if err != nil {
+		return nil, err
 	}
 	if len(cached) == 0 {
 		return map[string]any{"linked": false}, nil
@@ -233,29 +171,10 @@ func remoteLookup(c context.Context, ctx plugin.Context, db *sql.DB, viewerID, u
 	if err := json.Unmarshal(cached, &profile); err != nil {
 		return map[string]any{"linked": false}, nil
 	}
-	// 相手が返したアイコン URL は**相手のインスタンスの**プロキシを指す。
-	// そのまま出すと CSP (img-src 'self') で表示できないので、こちらの
-	// プロキシ経由に貼り替える。
+	// 相手が返した URL は**相手のインスタンスの**プロキシを指す。そのまま出すと
+	// CSP で表示できないうえ、閲覧者の接続先が相手に漏れる。
 	rewriteAssetHosts(profile)
 	return profile, nil
-}
-
-// ask sends the lookup, remembering which username it was for.
-func ask(c context.Context, ctx plugin.Context, db *sql.DB, host, username string) {
-	peer := ctx.Peer()
-	ok, err := peer.Has(c, host)
-	if err != nil || !ok {
-		// 相手が同じプラグインを持っていない。**普通のこと**なので黙って諦める。
-		return
-	}
-	id, err := peer.Send(c, host, peerRequest{Username: username})
-	if err != nil {
-		ctx.Logger().Debug("リモートへの問い合わせを出せませんでした", "host", host, "err", err)
-		return
-	}
-	if err := rememberPending(c, db, id, host, username); err != nil {
-		ctx.Logger().Warn("問い合わせの記録に失敗しました", "id", id, "err", err)
-	}
 }
 
 // remoteAcct resolves a user id to its host and username.
