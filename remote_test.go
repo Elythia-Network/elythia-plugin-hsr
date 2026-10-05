@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shiroha-a/mk/plugin"
-	"github.com/shiroha-a/mk/plugin/plugintest"
+	"github.com/elythia-network/elythia/plugin"
+	"github.com/elythia-network/elythia/plugin/plugintest"
 )
 
 // 相手のインスタンスのプロキシ URL を、こちらのプロキシ URL に貼り替えること。

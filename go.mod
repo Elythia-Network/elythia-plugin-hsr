@@ -1,11 +1,11 @@
-module github.com/shiroha-a/mk-plugin-hsr
+module github.com/elythia-network/elythia-plugin-hsr
 
 go 1.26.6
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/kovidgoyal/imaging v1.8.21
-	github.com/shiroha-a/mk v0.0.0
+	github.com/elythia-network/elythia v0.0.0
 )
 
 require (
@@ -21,4 +21,4 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 )
 
-replace github.com/shiroha-a/mk => ../..
+replace github.com/elythia-network/elythia => ../..
