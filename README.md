@@ -141,7 +141,7 @@ DB は実 PostgreSQL を使う (`TEST_DB_*` 環境変数)。Enka とマスター
 
 ### CI
 
-`.github/workflows/ci.yml` が、push と PR のたびに次の 4 つを回す。本体のリポジトリの workflow は使わず、このリポジトリだけで完結する。
+`.github/workflows/ci.yml` が、main への push、PR、毎週 1 回の定期実行で次の 4 つを回す。本体のリポジトリの workflow は使わず、このリポジトリだけで完結する。
 
 | job | 見るもの |
 |---|---|
@@ -150,7 +150,7 @@ DB は実 PostgreSQL を使う (`TEST_DB_*` 環境変数)。Enka とマスター
 | `vulncheck` | govulncheck (このプラグインのパッケージだけ) |
 | `frontend` | 本体の frontend の typecheck (このプラグインの `.vue` / `.ts` を含む)、このプラグインの `frontend/` の eslint |
 
-本体は `ELYTHIA_REF` に書いた版を取ってきて、このリポジトリを `plugins/hsr` に置いて組む。**前提にするのは本体の最新のリリース**で、今は `2.0.0`。本体の新しいリリースが出たら、`ELYTHIA_REF` を上げる PR を出して CI が通ることを確かめる。Go の版はこのリポジトリの `go.mod` で決まる (本体の `go.mod` より新しくてよい)。
+本体は `ELYTHIA_REF` に書いた版を取ってきて、このリポジトリを `plugins/hsr` に置いて組む。**前提にするのは本体の最新のリリース**で、今は `2.0.0`。本体の新しいリリースが出たら、`ELYTHIA_REF` を上げる PR を出して CI が通ることを確かめる。Go の版はこのリポジトリの `go.mod` で決まる。本体の `go.mod` より新しくてよく、`go.work` は 2 つの新しい方の版で組む。
 
 ## ライセンス
 
