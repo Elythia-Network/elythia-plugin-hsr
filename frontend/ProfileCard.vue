@@ -150,7 +150,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue';
-import { type SlotContext } from '@/plugin-api.js';
+import type { SlotContext } from '@/plugin-api.js';
 import { api, slotLabel, traceLabel, elementLabel, elementColor, pathLabel, fmtStat } from './api.js';
 import type { ProfileResponse, LinkedProfile } from './api.js';
 
