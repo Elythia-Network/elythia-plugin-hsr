@@ -31,11 +31,6 @@ import (
  * などは 404)。5 体分並べると 9MB になり、モバイルでは無視できない。
  */
 
-// assetBase is where Enka serves the Star Rail UI images.
-//
-// マスターが持つパスは `/ui/hsr/...` から始まるので、その手前までを持つ。
-const assetBase = "https://enka.network"
-
 // assetPathPrefix is the only place we will fetch from.
 //
 // **ここを固定するのが SSRF 対策の主軸。** 受け取った文字列をそのまま URL に
